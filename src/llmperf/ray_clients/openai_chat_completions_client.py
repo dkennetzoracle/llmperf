@@ -10,10 +10,14 @@ from llmperf.ray_llm_client import LLMClient
 from llmperf.models import RequestConfig
 from llmperf import common_metrics
 
+import urllib3
 
 @ray.remote
 class OpenAIChatCompletionsClient(LLMClient):
     """Client for OpenAI Chat Completions API."""
+
+    def __init__(self):
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     def llm_request(self, request_config: RequestConfig) -> Dict[str, Any]:
         prompt = request_config.prompt
@@ -66,6 +70,7 @@ class OpenAIChatCompletionsClient(LLMClient):
                 stream=True,
                 timeout=180,
                 headers=headers,
+                verify=False,
             ) as response:
                 if response.status_code != 200:
                     error_msg = response.text

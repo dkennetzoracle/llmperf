@@ -8,6 +8,7 @@ import re
 import time
 import random
 from typing import Any, Dict, List, Optional, Tuple
+import urllib3
 
 import pandas as pd
 import ray
@@ -25,6 +26,8 @@ from llmperf.utils import (
 from tqdm import tqdm
 
 from transformers import LlamaTokenizerFast
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 def get_token_throughput_latencies(
     model: str,
@@ -163,7 +166,7 @@ def get_token_throughput_latencies(
                 request_metrics[common_metrics.REQ_OUTPUT_THROUGHPUT] = num_output_tokens / request_metrics[common_metrics.E2E_LAT]
                 completed_requests.extend(request_metrics)
 
-    print(f"\Results for token benchmark for {model} queried with the {llm_api} api.\n")
+    print(f"Results for token benchmark for {model} queried with the {llm_api} api.\n")
     ret = metrics_summary(completed_requests, start_time, end_time)
 
     metadata = {
