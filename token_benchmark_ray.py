@@ -1,6 +1,7 @@
 import threading
 import argparse
 from collections.abc import Iterable
+import itertools
 import json
 import os
 from pathlib import Path
@@ -333,7 +334,7 @@ def run_token_benchmark(
     )
 
     if results_dir:
-        filename = f"{model}_{mean_input_tokens}_{mean_output_tokens}"
+        filename = f"{model}_{mean_input_tokens}_{mean_output_tokens}_{num_concurrent_requests}"
         filename = re.sub(r"[^\w\d-]+", "-", filename)
         filename = re.sub(r"-{2,}", "-", filename)
         summary_filename = f"{filename}_summary"
@@ -374,10 +375,11 @@ args.add_argument(
 args.add_argument(
     "--mean-input-tokens",
     type=int,
-    default=550,
+    nargs='+',
+    default=[550],
     help=(
         "The mean number of tokens to send in the prompt for the request. "
-        " (default: %(default)s)"
+        "Can specify multiple values to run a test matrix. (default: %(default)s)"
     ),
 )
 args.add_argument(
@@ -392,11 +394,12 @@ args.add_argument(
 args.add_argument(
     "--mean-output-tokens",
     type=int,
-    default=150,
+    nargs='+',
+    default=[150],
     help=(
         "The mean number of tokens to generate from each llm request. This is the max_tokens param "
         "for the completions API. Note that this is not always the number of tokens returned. "
-        "(default: %(default)s)"
+        "Can specify multiple values to run a test matrix. (default: %(default)s)"
     ),
 )
 args.add_argument(
@@ -411,8 +414,9 @@ args.add_argument(
 args.add_argument(
     "--num-concurrent-requests",
     type=int,
-    default=10,
-    help=("The number of concurrent requests to send (default: %(default)s)"),
+    nargs='+',
+    default=[10],
+    help=("The number of concurrent requests to send. Can specify multiple values to run a test matrix. (default: %(default)s)"),
 )
 args.add_argument(
     "--timeout",
@@ -478,17 +482,34 @@ if __name__ == "__main__":
             key, value = item.split("=")
             user_metadata[key] = value
 
-    run_token_benchmark(
-        llm_api=args.llm_api,
-        model=args.model,
-        test_timeout_s=args.timeout,
-        max_num_completed_requests=args.max_num_completed_requests,
-        mean_input_tokens=args.mean_input_tokens,
-        stddev_input_tokens=args.stddev_input_tokens,
-        mean_output_tokens=args.mean_output_tokens,
-        stddev_output_tokens=args.stddev_output_tokens,
-        num_concurrent_requests=args.num_concurrent_requests,
-        additional_sampling_params=args.additional_sampling_params,
-        results_dir=args.results_dir,
-        user_metadata=user_metadata,
-    )
+    # Generate all combinations of test parameters
+    test_combinations = list(itertools.product(
+        args.mean_input_tokens,
+        args.mean_output_tokens,
+        args.num_concurrent_requests
+    ))
+    
+    print(f"Running {len(test_combinations)} test combinations:")
+    for i, (mean_input, mean_output, concurrency) in enumerate(test_combinations):
+        print(f"  {i+1}/{len(test_combinations)}: input_tokens={mean_input}, output_tokens={mean_output}, concurrency={concurrency}")
+    print()
+    
+    for i, (mean_input, mean_output, concurrency) in enumerate(test_combinations):
+        print(f"\n{'='*80}")
+        print(f"Running test {i+1}/{len(test_combinations)}: input_tokens={mean_input}, output_tokens={mean_output}, concurrency={concurrency}")
+        print(f"{'='*80}")
+        
+        run_token_benchmark(
+            llm_api=args.llm_api,
+            model=args.model,
+            test_timeout_s=args.timeout,
+            max_num_completed_requests=args.max_num_completed_requests,
+            mean_input_tokens=mean_input,
+            stddev_input_tokens=args.stddev_input_tokens,
+            mean_output_tokens=mean_output,
+            stddev_output_tokens=args.stddev_output_tokens,
+            num_concurrent_requests=concurrency,
+            additional_sampling_params=args.additional_sampling_params,
+            results_dir=args.results_dir,
+            user_metadata=user_metadata,
+        )
