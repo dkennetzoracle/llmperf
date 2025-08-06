@@ -10,6 +10,7 @@ import time
 import random
 from typing import Any, Dict, List, Optional, Tuple
 import urllib3
+import sys
 
 import pandas as pd
 import ray
@@ -27,6 +28,7 @@ from llmperf.utils import (
 from tqdm import tqdm
 
 from transformers import LlamaTokenizerFast
+import mlflow
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -339,6 +341,119 @@ def metrics_summary(
     return ret
 
 
+def log_to_mlflow(
+    mlflow_uri: str,
+    model: str,
+    mean_input_tokens: int,
+    mean_output_tokens: int,
+    num_concurrent_requests: int,
+    summary: Dict[str, Any],
+    user_metadata: Dict[str, Any],
+    tensor_parallel_size: int,
+    gpu_name: str
+):
+    """Log benchmark results to MLflow.
+    
+    Args:
+        mlflow_uri: The MLflow tracking URI
+        model: The model name
+        mean_input_tokens: Mean input tokens for this test
+        mean_output_tokens: Mean output tokens for this test  
+        num_concurrent_requests: Number of concurrent requests
+        summary: The results summary dictionary
+        user_metadata: Additional user metadata
+        tensor_parallel_size: The number of tensor parallel processes model is running on.
+        gpu_name: The name of the GPU to use for this load test - ex "mi300x" or "h100".
+    """
+    try:
+        # Set MLflow tracking URI
+        mlflow.set_tracking_uri(mlflow_uri)
+        
+        # Create experiment name based on model
+        experiment_name = f"llmperf-{model}"
+        try:
+            mlflow.create_experiment(experiment_name)
+        except mlflow.exceptions.MlflowException:
+            # Experiment already exists
+            pass
+        mlflow.set_experiment(experiment_name)
+        
+        # Start MLflow run
+        run_name = f"{model}_input_{mean_input_tokens}_output_{mean_output_tokens}_concurrent_{num_concurrent_requests}_tp_{tensor_parallel_size}_gpu_{gpu_name}"
+        
+        with mlflow.start_run(run_name=run_name):
+            # Log parameters
+            mlflow.log_param("model", model)
+            mlflow.log_param("mean_input_tokens", mean_input_tokens)
+            mlflow.log_param("stddev_input_tokens", summary.get("stddev_input_tokens", "N/A"))
+            mlflow.log_param("mean_output_tokens", mean_output_tokens)
+            mlflow.log_param("stddev_output_tokens", summary.get("stddev_output_tokens", "N/A"))
+            mlflow.log_param("num_concurrent_requests", num_concurrent_requests)
+            mlflow.log_param("tensor_parallel_size", tensor_parallel_size)
+            mlflow.log_param("additional_sampling_params", str(summary.get("additional_sampling_params", {})))
+            
+            # Log user metadata as parameters
+            for key, value in user_metadata.items():
+                mlflow.log_param(f"user_{key}", value)
+            
+            # Log results metrics
+            results = summary.get("results", {})
+            
+            # Log main performance metrics
+            if common_metrics.OUTPUT_THROUGHPUT in results:
+                mlflow.log_metric("output_throughput_tokens_per_s", results[common_metrics.OUTPUT_THROUGHPUT])
+            
+            if common_metrics.NUM_COMPLETED_REQUESTS in results:
+                mlflow.log_metric("completed_requests", results[common_metrics.NUM_COMPLETED_REQUESTS])
+                
+            if common_metrics.COMPLETED_REQUESTS_PER_MIN in results:
+                mlflow.log_metric("completed_requests_per_min", results[common_metrics.COMPLETED_REQUESTS_PER_MIN])
+                
+            if common_metrics.ERROR_RATE in results:
+                mlflow.log_metric("error_rate", results[common_metrics.ERROR_RATE])
+                
+            if common_metrics.NUM_ERRORS in results:
+                mlflow.log_metric("num_errors", results[common_metrics.NUM_ERRORS])
+            
+            # Log detailed metrics for key performance indicators
+            # Group related metrics together using hierarchical naming
+            metrics_to_log = [
+                common_metrics.INTER_TOKEN_LAT,
+                common_metrics.TTFT,
+                common_metrics.E2E_LAT,
+                common_metrics.REQ_OUTPUT_THROUGHPUT,
+                common_metrics.NUM_INPUT_TOKENS,
+                common_metrics.NUM_OUTPUT_TOKENS
+            ]
+            
+            for metric in metrics_to_log:
+                if metric in results:
+                    metric_data = results[metric]
+                    if isinstance(metric_data, dict):
+                        # Create a cleaner metric name for grouping
+                        clean_metric_name = metric.replace("_", " ").title()
+                        
+                        # Log quantiles as a grouped metric using percentile values as steps
+                        # Note: MLflow will show these as steps on x-axis, representing percentile values
+                        if "quantiles" in metric_data:
+                            quantile_mapping = {"p25": 25, "p50": 50, "p75": 75, "p90": 90, "p95": 95, "p99": 99}
+                            for quantile, step_value in quantile_mapping.items():
+                                if quantile in metric_data["quantiles"]:
+                                    mlflow.log_metric(f"{clean_metric_name} Percentiles", 
+                                                    metric_data["quantiles"][quantile], step=step_value)
+                        
+                        # Log statistical measures as individual metrics (cleaner than artificial grouping)
+                        stats_to_log = ["min", "mean", "max", "stddev"]
+                        for stat in stats_to_log:
+                            if stat in metric_data:
+                                mlflow.log_metric(f"{clean_metric_name} {stat.title()}", metric_data[stat])
+            
+            print(f"Results logged to MLflow experiment '{experiment_name}' with run name '{run_name}'")
+            
+    except Exception as e:
+        print(f"Failed to log to MLflow: {e}")
+
+
 def run_token_benchmark(
     llm_api: str,
     model: str,
@@ -353,6 +468,9 @@ def run_token_benchmark(
     additional_sampling_params: str,
     results_dir: str,
     user_metadata: Dict[str, Any],
+    mlflow_uri: str = "",
+    tensor_parallel_size: int = 0,
+    gpu_name: str = "gpu"
 ):
     """
     Args:
@@ -370,6 +488,8 @@ def run_token_benchmark(
             For more information see the LLM APIs documentation for the completions.
         results_dir: The directory to save the results to.
         user_metadata: Additional metadata to include in the results.
+        tensor_parallel_size: The number of tensor parallel processes model is running on.
+        gpu_name: The name of the GPU to use for this load test - ex "mi300x" or "h100".
     """
     if mean_input_tokens < 40:
         print(
@@ -421,6 +541,20 @@ def run_token_benchmark(
         except Exception as e:
             print(individual_responses)
             raise e
+    
+    # Log to MLflow if URI is provided
+    if mlflow_uri:
+        log_to_mlflow(
+            mlflow_uri=mlflow_uri,
+            model=model,
+            mean_input_tokens=mean_input_tokens,
+            mean_output_tokens=mean_output_tokens,
+            num_concurrent_requests=num_concurrent_requests,
+            summary=summary,
+            user_metadata=user_metadata,
+            tensor_parallel_size=tensor_parallel_size,
+            gpu_name=gpu_name,
+        )
 
 
 args = argparse.ArgumentParser(
@@ -539,6 +673,29 @@ args.add_argument(
         "name=foo,bar=1. These will be added to the metadata field of the results. "
     ),
 )
+args.add_argument(
+    "--mlflow-uri",
+    type=str,
+    default="",
+    help=(
+        "MLflow tracking URI to log results to (e.g., http://localhost:5000). "
+        "If not provided, results will not be logged to MLflow."
+    ),
+)
+
+args.add_argument(
+    "--tensor-parallel-size",
+    type=int,
+    default=0,
+    help="The number of tensor parallel processes to use. (default: %(default)s)",
+)
+
+args.add_argument(
+    "--gpu-name",
+    type=str,
+    default="gpu",
+    help="The name of the GPU to use for this load test. (default: %(default)s)",
+)
 
 if __name__ == "__main__":
     env_vars = dict(os.environ)
@@ -593,4 +750,7 @@ if __name__ == "__main__":
             additional_sampling_params=args.additional_sampling_params,
             results_dir=args.results_dir,
             user_metadata=user_metadata,
+            mlflow_uri=args.mlflow_uri,
+            tensor_parallel_size=args.tensor_parallel_size,
+            gpu_name=args.gpu_name,
         )
