@@ -39,6 +39,7 @@ def get_token_throughput_latencies(
     additional_sampling_params: Optional[Dict[str, Any]] = None,
     num_concurrent_requests: int = 1,
     max_num_completed_requests: int = 500,
+    num_warmup_requests: int = 0,
     test_timeout_s=90,
     llm_api="openai",
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
@@ -54,6 +55,9 @@ def get_token_throughput_latencies(
             For more information see the LLM APIs documentation for the completions
         num_concurrent_requests: The number of concurrent requests to make. Increase
             this to increase the amount of load and vice versa.
+        max_num_completed_requests: The number of requests to complete before finishing the test.
+        num_warmup_requests: The number of warmup requests to send before starting the benchmark.
+            These requests are not included in the final statistics.
         test_timeout_s: The amount of time to run the test for before reporting results.
         llm_api: The name of the llm api to use. Either "openai" or "litellm".
 
@@ -75,10 +79,13 @@ def get_token_throughput_latencies(
     completed_requests_lock = threading.Lock()
     completed_requests = []
     num_completed_requests = 0
+    
     # make up prompts outside of send loop for faster benchmarking loop
+    # Include warmup requests in total prompt generation
+    total_requests = max_num_completed_requests + num_warmup_requests
     num_output_tokens_list = []
     prompts = []
-    for i in range(max_num_completed_requests):
+    for i in range(total_requests):
         num_output_tokens = (sample_random_positive_int(
             mean_output_tokens, stddev_output_tokens
         ))
@@ -90,14 +97,63 @@ def get_token_throughput_latencies(
             expect_output_tokens=num_output_tokens,
             tokenizer=tokenizer
         ))
+    
+    # Run warmup requests first if specified
+    if num_warmup_requests > 0:
+        print(f"Running {num_warmup_requests} warmup requests...")
+        warmup_completed = 0
+        warmup_lock = threading.Lock()
+        warmup_pbar = tqdm(total=num_warmup_requests, desc="Warmup")
+        
+        def warmup_request(thread_index):
+            nonlocal warmup_completed
+            clients = construct_clients(llm_api=llm_api, num_clients=1)
+            req_launcher = RequestsLauncher(clients)
+            request_index = thread_index % num_warmup_requests
+            
+            while warmup_completed < num_warmup_requests:
+                default_sampling_params = {"max_tokens": num_output_tokens_list[request_index]}
+                default_sampling_params.update(additional_sampling_params)
+                request_config = RequestConfig(
+                    model=model,
+                    prompt=prompts[request_index],
+                    sampling_params=default_sampling_params,
+                    llm_api=llm_api,
+                )
+                req_launcher.launch_requests(request_config)
+                
+                outs = req_launcher.get_next_ready()
+                for out in outs:
+                    with warmup_lock:
+                        if warmup_completed < num_warmup_requests:
+                            warmup_completed += 1
+                            warmup_pbar.update(1)
+                            request_index = (request_index + num_concurrent_requests) % num_warmup_requests
+        
+        # Launch warmup threads
+        warmup_threads = []
+        for i in range(num_concurrent_requests):
+            thread = threading.Thread(target=warmup_request, args=(i,))
+            warmup_threads.append(thread)
+            thread.start()
+        
+        # Wait for warmup completion
+        for thread in warmup_threads:
+            thread.join()
+        
+        warmup_pbar.close()
+        print("Warmup completed. Starting benchmark...")
+    
+    # Reset for actual benchmark
     start_time = time.monotonic()
-    pbar = tqdm(total=max_num_completed_requests)
+    pbar = tqdm(total=max_num_completed_requests, desc="Benchmark")
 
     def launch_request(thread_index):
         nonlocal num_completed_requests
         clients = construct_clients(llm_api=llm_api, num_clients=1)
         req_launcher = RequestsLauncher(clients)
-        request_index = thread_index % max_num_completed_requests
+        # Start indexing after warmup prompts
+        request_index = num_warmup_requests + (thread_index % max_num_completed_requests)
 
         while (
             time.monotonic() - start_time < test_timeout_s
@@ -132,7 +188,7 @@ def get_token_throughput_latencies(
                         completed_requests.extend(all_metrics)
                         pbar.update(len(all_metrics))
                         num_completed_requests += len(all_metrics)
-                        request_index = (request_index + num_concurrent_requests) % max_num_completed_requests
+                        request_index = num_warmup_requests + ((request_index - num_warmup_requests + num_concurrent_requests) % max_num_completed_requests)
 
     threads = []
     for i in range(num_concurrent_requests):
@@ -293,6 +349,7 @@ def run_token_benchmark(
     stddev_input_tokens: int,
     mean_output_tokens: int,
     stddev_output_tokens: int,
+    num_warmup_requests: int,
     additional_sampling_params: str,
     results_dir: str,
     user_metadata: Dict[str, Any],
@@ -330,6 +387,7 @@ def run_token_benchmark(
         mean_output_tokens=mean_output_tokens,
         stddev_output_tokens=stddev_output_tokens,
         num_concurrent_requests=num_concurrent_requests,
+        num_warmup_requests=num_warmup_requests,
         additional_sampling_params=json.loads(additional_sampling_params),
     )
 
@@ -429,8 +487,20 @@ args.add_argument(
     type=int,
     default=10,
     help=(
-        "The number of requests to complete before finishing the test. Note "
+        "The base number of requests to complete before finishing the test. "
+        "This will be multiplied by the concurrency level for each test "
+        "(e.g., base=100, concurrency=5 -> 500 total requests). Note "
         "that its possible for the test to timeout first. (default: %(default)s)"
+    ),
+)
+args.add_argument(
+    "--num-warmup-requests",
+    type=int,
+    default=0,
+    help=(
+        "The base number of warmup requests to send before starting the benchmark. "
+        "This will be multiplied by the concurrency level for each test "
+        "(e.g., base=10, concurrency=5 -> 50 warmup requests). (default: %(default)s)"
     ),
 )
 args.add_argument(
@@ -482,33 +552,44 @@ if __name__ == "__main__":
             key, value = item.split("=")
             user_metadata[key] = value
 
-    # Generate all combinations of test parameters
-    test_combinations = list(itertools.product(
-        args.mean_input_tokens,
-        args.mean_output_tokens,
-        args.num_concurrent_requests
-    ))
+    # Validate that input and output token lists have the same length for pairing
+    if len(args.mean_input_tokens) != len(args.mean_output_tokens):
+        raise ValueError(
+            f"Input tokens list length ({len(args.mean_input_tokens)}) must match "
+            f"output tokens list length ({len(args.mean_output_tokens)}) for pairing. "
+            f"Got input: {args.mean_input_tokens}, output: {args.mean_output_tokens}"
+        )
+    
+    # Generate test combinations: each input/output pair runs at each concurrency level
+    token_pairs = list(zip(args.mean_input_tokens, args.mean_output_tokens))
+    test_combinations = []
+    for mean_input, mean_output in token_pairs:
+        for concurrency in args.num_concurrent_requests:
+            max_requests = args.max_num_completed_requests * concurrency
+            warmup_requests = args.num_warmup_requests * concurrency
+            test_combinations.append((mean_input, mean_output, concurrency, max_requests, warmup_requests))
     
     print(f"Running {len(test_combinations)} test combinations:")
-    for i, (mean_input, mean_output, concurrency) in enumerate(test_combinations):
-        print(f"  {i+1}/{len(test_combinations)}: input_tokens={mean_input}, output_tokens={mean_output}, concurrency={concurrency}")
+    for i, (mean_input, mean_output, concurrency, max_requests, warmup_requests) in enumerate(test_combinations):
+        print(f"  {i+1}/{len(test_combinations)}: input_tokens={mean_input}, output_tokens={mean_output}, concurrency={concurrency}, max_requests={max_requests}, warmup_requests={warmup_requests}")
     print()
     
-    for i, (mean_input, mean_output, concurrency) in enumerate(test_combinations):
+    for i, (mean_input, mean_output, concurrency, max_requests, warmup_requests) in enumerate(test_combinations):
         print(f"\n{'='*80}")
-        print(f"Running test {i+1}/{len(test_combinations)}: input_tokens={mean_input}, output_tokens={mean_output}, concurrency={concurrency}")
+        print(f"Running test {i+1}/{len(test_combinations)}: input_tokens={mean_input}, output_tokens={mean_output}, concurrency={concurrency}, max_requests={max_requests}, warmup_requests={warmup_requests}")
         print(f"{'='*80}")
         
         run_token_benchmark(
             llm_api=args.llm_api,
             model=args.model,
             test_timeout_s=args.timeout,
-            max_num_completed_requests=args.max_num_completed_requests,
+            max_num_completed_requests=max_requests,
             mean_input_tokens=mean_input,
             stddev_input_tokens=args.stddev_input_tokens,
             mean_output_tokens=mean_output,
             stddev_output_tokens=args.stddev_output_tokens,
             num_concurrent_requests=concurrency,
+            num_warmup_requests=warmup_requests,
             additional_sampling_params=args.additional_sampling_params,
             results_dir=args.results_dir,
             user_metadata=user_metadata,
