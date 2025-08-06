@@ -1,0 +1,57 @@
+# Git and version control
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env
+venv
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+.tox
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.idea
+.DS_Store
+
+# Project specific
+analyze-token-benchmark-results.ipynb
+performance_summary.txt
+summarize_results.py
+pre-commit.sh
+requirements-dev.txt
+README.md
+LICENSE.txt
+NOTICE.txt
+
+# Result directories (these contain benchmark outputs)
+gpt-oss-mi300x-tp1/
+gpt-oss-mi300x-tp2/
+bk-gpt-oss-mi300x-tp1/
+bk-gpt-oss-mi300x-tp2/
+my-test-matrix/
+test-matrix-demo/
+mi300x-llama4-mav-2-replica-4-gpu/
+mi300x-llama4-mav-50/
+mi300x-llama4-mav/
+1b/
+rdma-b200-dsv3-1/
+rdma-b200-dsv3-2/
+rdma-b200-dsv3-3/
+t/
+
+# Build artifacts
+src/LLMPerf.egg-info/
+build/
+dist/
+*.egg-info/
