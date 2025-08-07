@@ -180,7 +180,10 @@ def get_token_throughput_latencies(
                 with completed_requests_lock:
                     if num_completed_requests < max_num_completed_requests:
                         if num_output_tokens:
-                            request_metrics[common_metrics.INTER_TOKEN_LAT] /= request_metrics[common_metrics.NUM_OUTPUT_TOKENS]
+                            try:
+                                request_metrics[common_metrics.INTER_TOKEN_LAT] /= request_metrics[common_metrics.NUM_OUTPUT_TOKENS]
+                            except ZeroDivisionError:
+                                request_metrics[common_metrics.INTER_TOKEN_LAT] = 0
                         else:
                             request_metrics[common_metrics.INTER_TOKEN_LAT] = 0
                         request_metrics[common_metrics.NUM_OUTPUT_TOKENS] = num_output_tokens
@@ -277,8 +280,11 @@ def metrics_summary(
                 yield sub_item
 
     df = pd.DataFrame(metrics)
-    df_without_errored_req = df[df[common_metrics.ERROR_CODE].isna()]
-    
+    try:
+        df_without_errored_req = df[df[common_metrics.ERROR_CODE].isna()]
+    except KeyError:
+        df_without_errored_req = df
+
     for key in [
         common_metrics.INTER_TOKEN_LAT,
         common_metrics.TTFT,
