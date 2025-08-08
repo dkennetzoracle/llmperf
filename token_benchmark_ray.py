@@ -188,7 +188,10 @@ def get_token_throughput_latencies(
                             request_metrics[common_metrics.INTER_TOKEN_LAT] = 0
                         request_metrics[common_metrics.NUM_OUTPUT_TOKENS] = num_output_tokens
                         request_metrics[common_metrics.NUM_TOTAL_TOKENS] = request_metrics[common_metrics.NUM_INPUT_TOKENS] + num_output_tokens
-                        request_metrics[common_metrics.REQ_OUTPUT_THROUGHPUT] = num_output_tokens / request_metrics[common_metrics.E2E_LAT]
+                        try:
+                            request_metrics[common_metrics.REQ_OUTPUT_THROUGHPUT] = num_output_tokens / request_metrics[common_metrics.E2E_LAT]
+                        except ZeroDivisionError:
+                            request_metrics[common_metrics.REQ_OUTPUT_THROUGHPUT] = 0
                         all_metrics.append(request_metrics)
                         completed_requests.extend(all_metrics)
                         pbar.update(len(all_metrics))
@@ -295,7 +298,10 @@ def metrics_summary(
     ]:
         print(key)
         ret[key] = {}
-        series = pd.Series(list(flatten(df_without_errored_req[key]))).dropna()
+        try:
+            series = pd.Series(list(flatten(df_without_errored_req[key]))).dropna()
+        except KeyError:
+            series = pd.Series(list(flatten(df[key]))).dropna()
         quantiles = series.quantile([0.25, 0.5, 0.75, 0.9, 0.95, 0.99]).to_dict()
         quantiles_reformatted_keys = {}
         for quantile, value in quantiles.items():
