@@ -74,7 +74,6 @@ def get_token_throughput_latencies(
         "hf-internal-testing/llama-tokenizer"
     )
     get_token_length = lambda text: len(tokenizer.encode(text))
-    
     if not additional_sampling_params:
         additional_sampling_params = {}
 
@@ -99,7 +98,6 @@ def get_token_throughput_latencies(
             expect_output_tokens=num_output_tokens,
             tokenizer=tokenizer
         ))
-    
     # Run warmup requests first if specified
     if num_warmup_requests > 0:
         print(f"Running {num_warmup_requests} warmup requests...")
@@ -176,22 +174,29 @@ def get_token_throughput_latencies(
             all_metrics = []
             for out in outs:
                 request_metrics, gen_text, _ = out
-                num_output_tokens = get_token_length(gen_text)
+                # Use metrics if available and valid, otherwise fallback to tokenizing generated text
+                num_output_tokens = request_metrics.get(common_metrics.NUM_OUTPUT_TOKENS, 0)
+                if not num_output_tokens and gen_text:
+                    # Fallback for older versions or when metrics are missing
+                    num_output_tokens = get_token_length(gen_text)
+                    # Only update metrics if they weren't already calculated
+                    request_metrics[common_metrics.NUM_OUTPUT_TOKENS] = num_output_tokens
+                    request_metrics[common_metrics.NUM_TOTAL_TOKENS] = request_metrics[common_metrics.NUM_INPUT_TOKENS] + num_output_tokens
                 with completed_requests_lock:
                     if num_completed_requests < max_num_completed_requests:
                         if num_output_tokens:
                             try:
-                                request_metrics[common_metrics.INTER_TOKEN_LAT] /= request_metrics[common_metrics.NUM_OUTPUT_TOKENS]
+                                request_metrics[common_metrics.INTER_TOKEN_LAT] /= num_output_tokens
                             except ZeroDivisionError:
                                 request_metrics[common_metrics.INTER_TOKEN_LAT] = 0
                         else:
                             request_metrics[common_metrics.INTER_TOKEN_LAT] = 0
-                        request_metrics[common_metrics.NUM_OUTPUT_TOKENS] = num_output_tokens
-                        request_metrics[common_metrics.NUM_TOTAL_TOKENS] = request_metrics[common_metrics.NUM_INPUT_TOKENS] + num_output_tokens
-                        try:
-                            request_metrics[common_metrics.REQ_OUTPUT_THROUGHPUT] = num_output_tokens / request_metrics[common_metrics.E2E_LAT]
-                        except ZeroDivisionError:
-                            request_metrics[common_metrics.REQ_OUTPUT_THROUGHPUT] = 0
+                        # Only recalculate throughput if it wasn't already calculated correctly
+                        if not request_metrics.get(common_metrics.REQ_OUTPUT_THROUGHPUT, 0):
+                            try:
+                                request_metrics[common_metrics.REQ_OUTPUT_THROUGHPUT] = num_output_tokens / request_metrics[common_metrics.E2E_LAT]
+                            except ZeroDivisionError:
+                                request_metrics[common_metrics.REQ_OUTPUT_THROUGHPUT] = 0
                         all_metrics.append(request_metrics)
                         completed_requests.extend(all_metrics)
                         pbar.update(len(all_metrics))
@@ -219,16 +224,23 @@ def get_token_throughput_latencies(
     all_metrics = []
     for out in outs:
         request_metrics, gen_text, _ = out
-        num_output_tokens = get_token_length(gen_text)
+        # Use metrics if available and valid, otherwise fallback to tokenizing generated text
+        num_output_tokens = request_metrics.get(common_metrics.NUM_OUTPUT_TOKENS, 0)
+        if not num_output_tokens and gen_text:
+            # Fallback for older versions or when metrics are missing
+            num_output_tokens = get_token_length(gen_text)
+            # Only update metrics if they weren't already calculated
+            request_metrics[common_metrics.NUM_OUTPUT_TOKENS] = num_output_tokens
+            request_metrics[common_metrics.NUM_TOTAL_TOKENS] = request_metrics[common_metrics.NUM_INPUT_TOKENS] + num_output_tokens
         with completed_requests_lock:
             if num_completed_requests < max_num_completed_requests:
                 if num_output_tokens:
                     request_metrics[common_metrics.INTER_TOKEN_LAT] /= num_output_tokens
                 else:
                     request_metrics[common_metrics.INTER_TOKEN_LAT] = 0
-                request_metrics[common_metrics.NUM_OUTPUT_TOKENS] = num_output_tokens
-                request_metrics[common_metrics.NUM_TOTAL_TOKENS] = request_metrics[common_metrics.NUM_INPUT_TOKENS] + num_output_tokens
-                request_metrics[common_metrics.REQ_OUTPUT_THROUGHPUT] = num_output_tokens / request_metrics[common_metrics.E2E_LAT]
+                # Only recalculate throughput if it wasn't already calculated correctly
+                if not request_metrics.get(common_metrics.REQ_OUTPUT_THROUGHPUT, 0):
+                    request_metrics[common_metrics.REQ_OUTPUT_THROUGHPUT] = num_output_tokens / request_metrics[common_metrics.E2E_LAT]
                 completed_requests.extend(request_metrics)
 
     print(f"Results for token benchmark for {model} queried with the {llm_api} api.\n")
