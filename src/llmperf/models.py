@@ -19,3 +19,5 @@ class RequestConfig(BaseModel):
     sampling_params: Optional[Dict[str, Any]] = None
     llm_api: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    api_key: Optional[str] = None
+    x_model_header: Optional[str] = None

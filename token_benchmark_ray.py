@@ -44,6 +44,8 @@ def get_token_throughput_latencies(
     num_warmup_requests: int = 0,
     test_timeout_s=90,
     llm_api="openai",
+    model_header: str = "",
+    api_key: str = "",
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """Get the token throughput and latencies for the given model.
 
@@ -119,6 +121,8 @@ def get_token_throughput_latencies(
                     prompt=prompts[request_index],
                     sampling_params=default_sampling_params,
                     llm_api=llm_api,
+                    x_model_header=model_header,
+                    api_key=api_key,
                 )
                 req_launcher.launch_requests(request_config)
                 
@@ -167,6 +171,8 @@ def get_token_throughput_latencies(
                 prompt=prompts[request_index],
                 sampling_params=default_sampling_params,
                 llm_api=llm_api,
+                x_model_header=model_header,
+                api_key=api_key,
             )
             req_launcher.launch_requests(request_config)
 
@@ -494,7 +500,9 @@ def run_token_benchmark(
     user_metadata: Dict[str, Any],
     mlflow_uri: str = "",
     tensor_parallel_size: int = 0,
-    gpu_name: str = "gpu"
+    gpu_name: str = "gpu",
+    model_header: str = "",
+    api_key: str = "",
 ):
     """
     Args:
@@ -533,6 +541,8 @@ def run_token_benchmark(
         num_concurrent_requests=num_concurrent_requests,
         num_warmup_requests=num_warmup_requests,
         additional_sampling_params=json.loads(additional_sampling_params),
+        model_header=model_header,
+        api_key=api_key,
     )
 
     if results_dir:
@@ -721,6 +731,19 @@ args.add_argument(
     help="The name of the GPU to use for this load test. (default: %(default)s)",
 )
 
+args.add_argument(
+    "--model-header",
+    type=str,
+    default="",
+    help="The model header to use for this load test. (default: %(default)s)",
+)
+
+args.add_argument(
+    "--api-key",
+    type=str,
+    default="",
+    help="The api key to use for this load test. (default: %(default)s)",
+)
 if __name__ == "__main__":
     env_vars = dict(os.environ)
     ray.init(runtime_env={"env_vars": env_vars})
@@ -747,7 +770,7 @@ if __name__ == "__main__":
     for mean_input, mean_output in token_pairs:
         for concurrency in args.num_concurrent_requests:
             max_requests = args.max_num_completed_requests * concurrency
-            warmup_requests = args.num_warmup_requests * concurrency
+            warmup_requests = args.num_warmup_requests
             test_combinations.append((mean_input, mean_output, concurrency, max_requests, warmup_requests))
     
     print(f"Running {len(test_combinations)} test combinations:")
@@ -777,4 +800,6 @@ if __name__ == "__main__":
             mlflow_uri=args.mlflow_uri,
             tensor_parallel_size=args.tensor_parallel_size,
             gpu_name=args.gpu_name,
+            model_header=args.model_header,
+            api_key=args.api_key,
         )

@@ -22,6 +22,8 @@ class OpenAIChatCompletionsClient(LLMClient):
     def llm_request(self, request_config: RequestConfig) -> Dict[str, Any]:
         prompt = request_config.prompt
         prompt, prompt_len = prompt
+        model_header = request_config.x_model_header
+        api_key = request_config.api_key
 
         message = [
             {"role": "system", "content": ""},
@@ -58,6 +60,10 @@ class OpenAIChatCompletionsClient(LLMClient):
         if not key:
             raise ValueError("the environment variable OPENAI_API_KEY must be set.")
         headers = {"Authorization": f"Bearer {key}"}
+        if model_header:
+            headers["X-Model"] = model_header
+        if api_key:
+            headers["apikey"] = api_key
         if not address:
             raise ValueError("No host provided.")
         if not address.endswith("/"):
